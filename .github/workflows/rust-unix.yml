@@ -3,6 +3,7 @@ name: Rust portable Linux et macOS
 on:
   workflow_dispatch:
   push:
+    tags: ['v*']
     paths:
       - '.github/workflows/rust-unix.yml'
       - 'packaging/unix/**'

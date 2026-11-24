@@ -705,7 +705,7 @@ $('#btn-save-program').onclick = () => {
   toast(`${name} enregistré dans le dossier de téléchargements`, 'ok');
 };
 
-const REPO = 'CodeNinjaPython/copeau';
+const REPO = 'Coolj974/copeau';
 const versionParts = (v) => String(v).replace(/^v/i, '').split(/[.+-]/).map((n) => parseInt(n, 10) || 0);
 const isNewer = (a, b) => {
   const x = versionParts(a), y = versionParts(b);
