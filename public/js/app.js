@@ -5,6 +5,7 @@ import { ibtn, initInfo } from './info.js';
 import { splitProgram, analyze, buildResume, fmt } from './shared/gcode.js';
 import { PROFILES, profileOf, laserSMax } from './shared/profiles.js';
 import { rasterGcode, powerMap, RASTER_DEFAULTS } from './shared/raster.js';
+import { jogPlan, segmentsDue, segmentAxes, travelled, JOG_REPEAT_MS } from './shared/jog.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
@@ -507,96 +508,197 @@ $('#jog-feed').onchange = () => store.set('jogFeed', Number($('#jog-feed').value
 
 const parseJog = (spec) => Object.fromEntries(spec.split(' ').map((p) => [p[0], Number(p.slice(1))]));
 
-// Appui = un pas de la taille choisie. Appui maintenu = le même pas répété
-// (1, 1, 1… ou 10, 10, 10…) au rythme où la machine le parcourt, avec un pas
-// d'avance pour un mouvement fluide. Au relâchement, arrêt immédiat là où se
-// trouve la tête (jog cancel). ■ ou Échap arrêtent aussi net.
+// Appui bref = un pas de la taille choisie. Appui maintenu = mouvement continu
+// à la vitesse du pas répété (au plus un pas toutes les 40 ms) : Grbl reçoit
+// de courts segments avec juste assez d'avance pour ne pas ralentir entre deux
+// (voir shared/jog.js). Au relâchement, arrêt immédiat là où se trouve la tête
+// (jog cancel). ■, Échap ou la perte du focus de la fenêtre arrêtent tout.
+// Un seul pilote pour les touches et les boutons : un nouvel appui remplace le
+// précédent, et un appui pendant un arrêt attend sa fin au lieu d'être perdu.
+const HOLD_MS = 300;
+const PUMP_MS = 25;
+const MAX_IN_FLIGHT = 2;
+// Avance tolérée, mesurée sur la position rapportée (jusqu'à 200 ms de retard) :
+// si la machine va moins vite que prévu, le planificateur de Grbl ne se remplit
+// pas (au plus 6 + 5 blocs + 2 en route, sur 15).
+const CAP_MARGIN_S = 0.5;
+
 // Nombre de jogs en train de s'arrêter : les zéros restent grisés pendant ce
 // temps, pour être posés à la position finale.
 let jogSettling = 0;
 
-function makeJogger() {
-  let holdTimer = null, repeatTimer = null, dir = null, step = 1, stopping = false;
+const jogger = (() => {
+  let active = null;      // appui en cours
+  let stopping = null;    // arrêt en cours (promesse)
+  const waiting = new Set(); // appuis qui attendent la fin de l'arrêt
+  let pendingJogs = 0;    // jogs envoyés, pas encore acquittés
+  let commanded = null;   // position machine au bout des jogs envoyés
+  let jogged = false;     // jog envoyé depuis le dernier arrêt
   const feed = () => Number($('#jog-feed').value) || 1000;
-  const stepOnce = () => {
-    const axes = Object.fromEntries(Object.entries(dir).map(([a, v]) => [a, v * step]));
-    // « Annulé » : pas d'avance retiré au relâchement, c'est voulu.
-    request('jog', { axes, feed: feed() }).catch((e) => { if (e.message !== 'Annulé') toastOnce(e.message); });
-  };
-  const stopTimers = () => {
-    clearTimeout(holdTimer);
-    clearInterval(repeatTimer);
-    holdTimer = repeatTimer = null;
-  };
-  // Arrêt immédiat. Les zéros restent grisés jusqu'à l'arrêt complet, pour
-  // être posés à la position finale. Smoothieware ne sait pas annuler un
-  // mouvement en douceur : il finit le pas en cours (gentle).
-  async function stopNow() {
-    stopping = true;
+  const moving = () => S.machine.ready && ['Jog', 'Run'].includes(S.machine.status.state);
+  const ignoreCancelled = (e) => { if (e.message !== 'Annulé') toastOnce(e.message); };
+
+  // Distance encore à parcourir, d'après la dernière position rapportée.
+  function ahead() {
+    const m = S.machine.status.mpos;
+    if (!commanded || !m) return 0;
+    return Math.hypot(commanded.X - m.X, commanded.Y - m.Y, commanded.Z - m.Z);
+  }
+
+  function send(axes, rate) {
+    const m = S.machine.status.mpos;
+    if (!pendingJogs && S.machine.status.state === 'Idle' && m) commanded = { X: m.X, Y: m.Y, Z: m.Z };
+    if (commanded) for (const a of Object.keys(axes)) commanded[a] += axes[a];
+    pendingJogs++;
+    jogged = true;
+    return request('jog', { axes, feed: rate }).then(
+      () => { pendingJogs--; },
+      (e) => { pendingJogs--; commanded = null; throw e; },
+    );
+  }
+
+  async function waitStopped(ms) {
+    const end = Date.now() + ms;
+    while (moving() && Date.now() < end) await new Promise((r) => setTimeout(r, 50));
+  }
+
+  // Smoothieware ne sait pas annuler un mouvement en douceur : gentle lui fait
+  // finir le pas en cours. Après un jog, les zéros restent grisés et les
+  // nouveaux appuis attendent jusqu'à l'arrêt complet.
+  function stop(gentle) {
+    const wait = jogged;
+    jogged = false;
+    commanded = null;
     jogSettling++;
     updateEnabled();
-    try {
-      await request('jogStop', { gentle: true });
-      await waitUntil(() => S.machine.status.state === 'Idle', 5000);
-    } catch (e) {
-      toastOnce(e.message);
-    } finally {
-      stopping = false;
+    const done = request('jogStop', { gentle })
+      .catch((e) => toastOnce(e.message))
+      .then(() => (wait ? waitStopped(5000) : undefined));
+    stopping = done;
+    done.then(() => {
+      if (stopping === done) stopping = null;
       jogSettling--;
       updateEnabled();
+    });
+    return done;
+  }
+
+  function begin(p) {
+    waiting.delete(p);
+    if (p.cancelled) return;
+    if ($('#jog-stop').disabled) { toastOnce(jogBlockedReason()); return; }
+    p.plan = jogPlan(p.dir, { step: jogStep, feed: feed(), settings: S.settings });
+    p.t0 = performance.now();
+    p.base = 0;
+    p.sent = p.plan.stepLen;
+    p.inFlight = 0;
+    p.stepAxes = Object.fromEntries(Object.entries(p.dir).map(([a, v]) => [a, v * jogStep]));
+    send(p.stepAxes, p.plan.stepRate).catch(ignoreCancelled);
+    // Déjà relâché pendant l'attente : un pas, rien de plus.
+    if (active === p) p.holdTimer = setTimeout(() => hold(p), HOLD_MS);
+  }
+
+  function hold(p) {
+    p.holdTimer = null;
+    if (active !== p) return;
+    p.streaming = true;
+    if (isSmoothie()) {
+      // Le pas répété, sans avance : au relâchement, la carte finit les pas
+      // reçus, une avance la ferait dépasser.
+      const ms = Math.max(JOG_REPEAT_MS, (p.plan.stepLen / p.plan.stepRate) * 60000);
+      p.timer = setInterval(() => send(p.stepAxes, p.plan.stepRate).catch(ignoreCancelled), ms);
+      return;
+    }
+    // Pas plus lent que le mouvement continu : celui-ci repart de l'arrêt.
+    if (!p.plan.continuesStep) { p.t0 = performance.now(); p.sent = 0; }
+    p.timer = setInterval(() => pump(p), PUMP_MS);
+    pump(p);
+  }
+
+  function pump(p) {
+    if (active !== p || p.failed) return;
+    const { plan } = p;
+    const v = plan.rate / 60;
+    let elapsed = (performance.now() - p.t0) / 1000;
+    // Plus rien devant la tête (minuteur ralenti, pas déjà fini) : elle s'est
+    // arrêtée, le modèle repart de l'arrêt au lieu de tout rattraper d'un coup.
+    if (travelled(elapsed, v, plan.accel) > p.sent - p.base) {
+      p.base = p.sent;
+      p.t0 = performance.now();
+      elapsed = 0;
+    }
+    let n = segmentsDue(plan, elapsed, p.sent - p.base, p.inFlight, MAX_IN_FLIGHT);
+    const cap = plan.lead + CAP_MARGIN_S * v;
+    for (; n > 0 && ahead() < cap; n--) {
+      p.sent += plan.segment;
+      p.inFlight++;
+      send(segmentAxes(plan), plan.rate).then(
+        () => { p.inFlight--; pump(p); },
+        (e) => {
+          p.inFlight--;
+          // Limite logicielle (error:15)… : on n'insiste pas jusqu'au relâchement.
+          if (e.message !== 'Annulé' && active === p) { p.failed = true; toastOnce(e.message); }
+        },
+      );
     }
   }
+
+  function end(p) {
+    if (active === p) active = null;
+    p.btn?.classList.remove('active');
+    clearTimeout(p.holdTimer);
+    clearInterval(p.timer);
+    p.holdTimer = p.timer = null;
+  }
+
   return {
-    press(d) {
-      if (holdTimer || repeatTimer || stopping) return;
-      dir = d;
-      step = jogStep;
-      stepOnce();
-      holdTimer = setTimeout(() => {
-        holdTimer = null;
-        // Durée d'un pas à la vitesse jog (diagonale comprise).
-        const dist = step * Math.hypot(...Object.values(dir));
-        const ms = Math.max(40, (dist / feed()) * 60000);
-        // Un pas d'avance pour un mouvement fluide. Pas avec Smoothieware : au
-        // relâchement il finit les pas reçus, un pas d'avance dépasserait.
-        if (!isSmoothie()) stepOnce();
-        repeatTimer = setInterval(stepOnce, ms);
-      }, 300);
+    // source : touche ou bouton, pour relâcher le bon appui. btn : bouton allumé.
+    press(dir, source, btn) {
+      if (active) this.release(active.source);
+      const p = { dir, source, btn };
+      active = p;
+      btn?.classList.add('active');
+      if (stopping) {
+        waiting.add(p);
+        stopping.then(() => begin(p));
+      } else begin(p);
     },
-    release() {
-      const repeating = !!repeatTimer;
-      stopTimers();
-      if (repeating) stopNow();
+    release(source) {
+      const p = active;
+      if (!p || p.source !== source) return;
+      const streaming = p.streaming;
+      end(p);
+      if (streaming) stop(true);
+    },
+    // ■, Échap, perte du focus : tout s'arrête, appuis en attente compris.
+    cancel() {
+      for (const p of waiting) p.cancelled = true;
+      waiting.clear();
+      if (active) end(active);
+      return stop(false);
     },
   };
-}
+})();
 
-const buttonJoggers = [];
 for (const b of $$('[data-jog]')) {
-  const j = makeJogger();
-  buttonJoggers.push(j);
   const dir = parseJog(b.dataset.jog);
-  b.addEventListener('pointerdown', (e) => { if (b.disabled) return; b.setPointerCapture(e.pointerId); b.classList.add('active'); j.press(dir); });
-  const up = () => { b.classList.remove('active'); j.release(dir); };
+  b.addEventListener('pointerdown', (e) => {
+    if (b.disabled) return;
+    b.setPointerCapture(e.pointerId);
+    jogger.press(dir, b, b);
+  });
+  const up = () => jogger.release(b);
   b.addEventListener('pointerup', up);
   b.addEventListener('pointercancel', up);
   b.addEventListener('keydown', (e) => {
     if (!['Enter', ' '].includes(e.key) || e.repeat || b.disabled) return;
     e.preventDefault();
-    b.classList.add('active');
-    j.press(dir);
+    jogger.press(dir, b, b);
   });
-  b.addEventListener('keyup', (e) => {
-    if (!['Enter', ' '].includes(e.key)) return;
-    b.classList.remove('active');
-    j.release(dir);
-  });
-  b.addEventListener('blur', () => {
-    b.classList.remove('active');
-    j.release(dir);
-  });
+  b.addEventListener('keyup', (e) => { if (['Enter', ' '].includes(e.key)) up(); });
+  b.addEventListener('blur', up);
 }
-$('#jog-stop').onclick = () => act('jogStop').catch(() => {});
+$('#jog-stop').onclick = () => jogger.cancel();
 
 // + / − (rangée principale ou pavé numérique) pilotent Z comme PgUp / PgDn.
 // « = » compte comme « + » : c'est la même touche sans Maj.
@@ -605,14 +707,25 @@ const KEYS = {
   PageUp: { Z: 1 }, PageDown: { Z: -1 }, '+': { Z: 1 }, '=': { Z: 1 }, '-': { Z: -1 },
 };
 const KEY_BUTTON = { ArrowLeft: 'X-1', ArrowRight: 'X1', ArrowUp: 'Y1', ArrowDown: 'Y-1', PageUp: 'Z1', PageDown: 'Z-1', '+': 'Z1', '=': 'Z1', '-': 'Z-1' };
-// Touches enfoncées, indexées par touche physique (e.code) : avec Maj, « + »
-// peut se relâcher en « = », il faut quand même arrêter le bon jog.
-const keyJoggers = {};
-const heldKeys = {};
-// Seuls les champs de saisie gardent les flèches ; un menu ou un bouton qui a
-// le focus ne doit pas empêcher de déplacer la machine.
-const typing = (e) => e.target.isContentEditable
+// Touches enfoncées, par touche physique (e.code) : avec Maj, « + » peut se
+// relâcher en « = », il faut quand même arrêter le bon jog.
+const heldKeys = new Set();
+// Contrôle qui a le focus (Espace lui revient).
+const onControl = (e) => e.target.isContentEditable
   || !!e.target.closest('input, select, textarea, button, a, summary, [role="button"], [role="tab"], [role="slider"]');
+// Focus donné au clavier (Tab) ou à la souris : un onglet, un menu ou un
+// curseur atteint au clavier garde les flèches pour sa navigation ; cliqué, il
+// ne doit pas empêcher de déplacer la machine (un clic donne le focus).
+let keyboardNav = false;
+document.addEventListener('pointerdown', () => { keyboardNav = false; }, true);
+document.addEventListener('keydown', (e) => { if (e.key === 'Tab') keyboardNav = true; }, true);
+const TEXT_INPUT = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number', 'date', 'time', 'datetime-local', 'month', 'week']);
+function keepsJogKeys(e) {
+  const t = e.target;
+  if (t.isContentEditable || t.tagName === 'TEXTAREA') return true;
+  if (t.tagName === 'INPUT') return TEXT_INPUT.has(t.type) || (['range', 'radio'].includes(t.type) && keyboardNav);
+  return keyboardNav && !!t.closest('select, [role="tab"], [role="slider"], [role="radio"], [role="listbox"], [role="menu"]');
+}
 
 function jogBlockedReason() {
   const m = S.machine;
@@ -623,38 +736,29 @@ function jogBlockedReason() {
 }
 
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { act('jogStop').catch(() => {}); closeGoto(); stopDraw(); stopPlace(); return; }
-  if (e.key === ' ' && preview.active && !typing(e) && e.target.tagName !== 'BUTTON') {
+  if (e.key === 'Escape') { jogger.cancel(); closeGoto(); stopDraw(); stopPlace(); return; }
+  if (e.key === ' ' && preview.active && !onControl(e)) {
     e.preventDefault();
     preview.playing ? preview.pause() : preview.play();
     return;
   }
-  if (!KEYS[e.key] || typing(e) || e.metaKey || e.ctrlKey || e.altKey) return;
+  // Fenêtre de génération laser ouverte : les flèches ne bougent pas la machine.
+  if (!KEYS[e.key] || keepsJogKeys(e) || e.metaKey || e.ctrlKey || e.altKey || !$('#raster').hidden) return;
   e.preventDefault();
   if (e.target.tagName === 'SELECT') e.target.blur();
-  if (e.repeat || heldKeys[e.code]) return;
+  if (e.repeat || heldKeys.has(e.code)) return;
   if ($('#jog-stop').disabled) { toastOnce(jogBlockedReason()); return; }
-  const held = { key: e.key, jogger: (keyJoggers[e.code] ||= makeJogger()) };
-  heldKeys[e.code] = held;
-  $(`[data-jog="${KEY_BUTTON[held.key]}"]`)?.classList.add('active');
-  held.jogger.press(KEYS[held.key]);
+  heldKeys.add(e.code);
+  jogger.press(KEYS[e.key], `key:${e.code}`, $(`[data-jog="${KEY_BUTTON[e.key]}"]`));
 });
 document.addEventListener('keyup', (e) => {
-  const held = heldKeys[e.code];
-  if (!held) return;
-  delete heldKeys[e.code];
-  $(`[data-jog="${KEY_BUTTON[held.key]}"]`)?.classList.remove('active');
-  held.jogger.release(KEYS[held.key]);
+  if (!heldKeys.delete(e.code)) return;
+  jogger.release(`key:${e.code}`);
 });
 window.addEventListener('blur', () => {
   // La fenêtre perd le focus : aucun relâchement de touche ne viendra.
-  for (const code of Object.keys(heldKeys)) {
-    $(`[data-jog="${KEY_BUTTON[heldKeys[code].key]}"]`)?.classList.remove('active');
-    heldKeys[code].jogger.release();
-    delete heldKeys[code];
-  }
-  for (const j of buttonJoggers) j.release();
-  act('jogStop').catch(() => {});
+  heldKeys.clear();
+  jogger.cancel();
 });
 
 // ---- Visualiseur & job ------------------------------------------------------
@@ -945,7 +1049,8 @@ function showTab(name) {
 $('.tabs').onclick = (e) => { const b = e.target.closest('[role="tab"]'); if (b) showTab(b.dataset.tab); };
 $('.tabs').addEventListener('keydown', (event) => {
   const current = event.target.closest('[role="tab"]');
-  if (!current) return;
+  // Onglet cliqué (focus souris) : les flèches déplacent la machine.
+  if (!current || (!keyboardNav && event.key.startsWith('Arrow'))) return;
   const tabs = tabButtons();
   const index = tabs.indexOf(current);
   let next = null;
