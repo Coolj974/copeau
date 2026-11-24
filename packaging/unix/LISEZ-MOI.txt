@@ -1,0 +1,22 @@
+Copeau portable — Linux et macOS
+
+Extrayez toute l'archive dans un dossier accessible en écriture.
+Sur Mac, double-cliquez sur Lancer-Copeau.command. Sous Linux, ouvrez un
+terminal dans le dossier extrait et lancez ./Lancer-Copeau.command.
+Le serveur écoute uniquement sur cet ordinateur. Si le navigateur ne
+s'ouvre pas, ouvrez l'adresse affichée dans le terminal.
+
+Gardez le terminal ouvert. Fermer l'onglet du navigateur n'arrête pas
+le serveur. Pour quitter, arrêtez l'usinage ou le palpage, attendez l'arrêt
+de la machine, puis appuyez sur Ctrl+C dans le terminal.
+
+Aucune installation de Rust, Node.js ou Electron n'est nécessaire.
+Pour installer dans votre dossier utilisateur plutôt qu'utiliser le dossier
+extrait, lancez ./installer.sh (sans sudo). Pour une mise à jour, quittez
+d'abord Copeau : le script remplace le programme, pas le dossier data.
+Vos réglages et votre dernier programme sont conservés dans data à côté du
+binaire. Si vous changez de dossier, gardez votre ancien dossier data.
+
+USB : votre compte doit avoir le droit d'accéder au port série de la carte.
+Commencez avec le simulateur. Le manuel et les notices des dépendances
+sont intégrés à l'application et consultables hors ligne.

@@ -1,0 +1,71 @@
+name: Rust portable Linux et macOS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/rust-unix.yml'
+      - 'packaging/unix/**'
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, platform: Linux-x64, arch: x86_64 }
+          - { runner: macos-15-intel, platform: macOS-Intel, arch: x86_64 }
+          - { runner: macos-15, platform: macOS-Apple-Silicon, arch: arm64 }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Identifier le tag de distribution
+        id: release
+        run: echo "tag=v$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Construire le même code que la release Windows
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ steps.release.outputs.tag }}
+          path: app
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.9.3
+      - name: Compiler et tester sur le système cible
+        working-directory: app
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          npm ci --omit=dev --no-audit --no-fund
+          target=$(rustc -vV | sed -n 's/^host: //p')
+          cargo about generate --target "$target" --locked --fail -o public/licenses-rust.html about.hbs
+          cargo test --locked
+          cargo build --release --locked
+      - name: Préparer et essayer l'archive
+        env:
+          PACKAGE: Copeau-Rust-${{ matrix.platform }}-${{ steps.release.outputs.tag }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/package/$PACKAGE" dist
+          install -m 755 app/target/release/copeau-rust packaging/unix/{Lancer-Copeau.command,installer.sh} "$RUNNER_TEMP/package/$PACKAGE/"
+          install -m 644 packaging/unix/LISEZ-MOI.txt "$RUNNER_TEMP/package/$PACKAGE/"
+          tar -czf "dist/$PACKAGE.tar.gz" -C "$RUNNER_TEMP/package" "$PACKAGE"
+          mkdir "$RUNNER_TEMP/archive test"
+          tar -xzf "dist/$PACKAGE.tar.gz" -C "$RUNNER_TEMP/archive test"
+          python3 packaging/unix/smoke.py "$RUNNER_TEMP/archive test/$PACKAGE" "${TAG#v}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Copeau-Rust-${{ matrix.platform }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0

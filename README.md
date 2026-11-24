@@ -31,6 +31,12 @@ Pour lancer uniquement le serveur Rust en développement, utilisez `cargo run --
 
 Après une modification des dépendances Rust, régénérez leurs notices avec `cargo about generate --locked --fail -o public\licenses-rust.html about.hbs` (outil `cargo-about`, fonctionnalité `cli`).
 
+### Portables Rust pour Linux et macOS
+
+Les archives `.tar.gz` se déclinent pour Linux x64, Mac Intel et Mac Apple Silicon. Extrayez l’archive qui correspond à votre ordinateur dans un dossier accessible en écriture. Sur Mac, double-cliquez sur `Lancer-Copeau.command` ; sous Linux, lancez `./Lancer-Copeau.command` depuis le terminal. Le lanceur ouvre l’interface dans votre navigateur, sur `127.0.0.1` seulement. Aucun environnement Node.js ou Rust à installer.
+
+Vous pouvez aussi lancer `./installer.sh` pour copier l’application dans votre dossier utilisateur sans `sudo`. Le dossier `data` reste à côté du binaire et n’est pas remplacé par l’installation. Gardez le terminal ouvert : pour quitter, arrêtez d’abord l’usinage ou le palpage, puis faites `Ctrl+C`. Fermer l’onglet ne suffit pas.
+
 ### Version Electron existante
 
 Avec Node.js 20 ou plus récent, depuis Windows :
