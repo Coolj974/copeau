@@ -1,6 +1,6 @@
 {
   "name": "copeau",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Interface web pour piloter une CNC Grbl / grblHAL",
   "type": "module",
   "main": "desktop/main.js",
