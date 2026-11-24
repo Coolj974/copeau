@@ -40,8 +40,12 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - uses: dtolnay/rust-toolchain@stable
       - uses: taiki-e/install-action@v2
+        if: matrix.runner != 'macos-15-intel'
         with:
           tool: cargo-about@0.9.3
+      - name: Installer le générateur de notices sur Mac Intel
+        if: matrix.runner == 'macos-15-intel'
+        run: cargo install cargo-about --version 0.9.3 --locked --features cli
       - name: Compiler et tester sur le système cible
         working-directory: app
         run: |
