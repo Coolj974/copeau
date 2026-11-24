@@ -10,16 +10,16 @@ case "$(uname -s)" in
 esac
 
 echo "Pour quitter : arrêtez l'usinage, puis appuyez sur Ctrl+C dans ce terminal."
-# N'ouvrir le navigateur qu'après la confirmation d'écoute de notre propre serveur.
-exec ./copeau-rust --server > >(
+afficher_et_ouvrir() {
   while IFS= read -r line; do
     printf '%s\n' "$line"
-    case "$line" in
-      "Copeau prêt : http://127.0.0.1:"*)
-        url=${line#* : }
-        if ! "$opener" "$url" </dev/null; then
-          printf 'Ouvrez %s dans votre navigateur.\n' "$url" >&2
-        fi ;;
-    esac
+    if [[ "$line" == "Copeau prêt : http://127.0.0.1:"* ]]; then
+      url=${line#* : }
+      if ! "$opener" "$url" </dev/null; then
+        printf 'Ouvrez %s dans votre navigateur.\n' "$url" >&2
+      fi
+    fi
   done
-)
+}
+# N'ouvrir le navigateur qu'après la confirmation d'écoute de notre propre serveur.
+exec ./copeau-rust --server > >(afficher_et_ouvrir)
