@@ -119,7 +119,23 @@
           <span>Rapide</span><b id="ov-rapid">100%</b>
           <button data-rt="rapid25">25</button><button data-rt="rapid50">50</button><button data-rt="rapid100">100</button>
         </div>
-        <div class="live muted small"><span id="live-feed">F 0</span> · <span id="live-speed">S 0</span> · <span id="live-modal"></span></div>
+        <div class="machine-readouts" aria-label="Vitesses rapportées par la machine">
+          <div class="machine-readout">
+            <span class="machine-readout-label">Avance</span>
+            <span><strong id="live-feed">—</strong><small>mm/min</small></span>
+          </div>
+          <div class="machine-readout cnc-only">
+            <span class="machine-readout-label">Broche S</span>
+            <span title="Valeur rapportée par le contrôleur, pas une mesure par tachymètre">
+              <strong id="live-rpm" aria-label="Vitesse de broche rapportée par le contrôleur, non mesurée par un tachymètre">—</strong><small>tr/min</small>
+            </span>
+          </div>
+          <div class="machine-readout laser-only">
+            <span class="machine-readout-label">Laser</span>
+            <span><strong id="live-laser-power">—</strong><small>%</small></span>
+          </div>
+        </div>
+        <div class="live muted small"><span>Modes actifs</span> · <span id="live-modal"></span></div>
       </div>
     </section>
 

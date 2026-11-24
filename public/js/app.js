@@ -361,13 +361,16 @@ function renderMachine() {
   $('#ov-feed').textContent = `${s.ov?.feed ?? 100}%`;
   $('#ov-spindle').textContent = `${s.ov?.spindle ?? 100}%`;
   $('#ov-rapid').textContent = `${s.ov?.rapid ?? 100}%`;
-  $('#live-feed').textContent = `F ${s.feed ?? 0}`;
+  $('#live-feed').textContent = m.ready && Number.isFinite(s.feed) ? fmtNum(s.feed) : '—';
   const power = laserPower();
-  $('#live-speed').textContent = isLaser() ? `Laser ${fmtNum(power)} %` : `S ${s.speed ?? 0}`;
+  $('#live-rpm').textContent = m.ready && Number.isFinite(s.speed) ? fmtNum(s.speed) : '—';
+  $('#live-laser-power').textContent = m.ready ? fmtNum(power) : '—';
   const live = $('#laser-live');
   live.textContent = m.pointer ? `repérage ${fmt(m.pointer.power)} %` : power > 0 ? `${fmtNum(power)} %` : 'éteint';
   live.classList.toggle('on', !!m.pointer || power > 0);
-  $('#live-modal').textContent = m.modal ? [m.modal.distance, m.modal.spindle, m.modal.coolant].filter(Boolean).join(' ') : '';
+  $('#live-modal').textContent = m.ready && m.modal
+    ? [m.modal.spindle, m.modal.distance, m.modal.coolant].filter(Boolean).join(' · ')
+    : '—';
 
   const alarm = m.ready && state === 'Alarm';
   const bar = $('#alarm-bar');
